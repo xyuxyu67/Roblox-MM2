@@ -64,7 +64,7 @@ local FARM_SPEED = 22
 local EVENT_CURRENCY = "SnowToken"
 
 -- Timing settings
-local NEW_FARM_COLLECT_TIME = 0.25
+local NEW_FARM_COLLECT_TIME = 0.35
 local NEW_FARM_REST_TIME = 2
 
 -- Icons
