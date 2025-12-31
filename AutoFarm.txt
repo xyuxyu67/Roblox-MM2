@@ -13,7 +13,6 @@ if not game:IsLoaded() then
 end
 
 -- === DEVICE DETECTION & SCALING ===
--- Делаем так, чтобы на телефоне кнопки были больше (1.3x), а на ПК — нормальные (1.0x)
 local isMobile = UserInputService.TouchEnabled
 local SCALE_MULTIPLIER = isMobile and 1.3 or 1.0
 
@@ -39,8 +38,11 @@ local LABEL_BG_TRANSPARENCY = 0.7
 local LABEL_BG_HEIGHT = 30 * SCALE_MULTIPLIER
 local LABEL_BG_CORNER_RADIUS = 15 * SCALE_MULTIPLIER
 local LABEL_FONT_SIZE = 18 * SCALE_MULTIPLIER
-local TOGGLE_TOP_MARGIN = 45 * SCALE_MULTIPLIER
-local ROW_SPACING = 5 * SCALE_MULTIPLIER
+
+-- Decreased top margin (was 45)
+local TOGGLE_TOP_MARGIN = 35 * SCALE_MULTIPLIER 
+local ROW_SPACING = 4 * SCALE_MULTIPLIER -- Slightly denser rows
+
 local TOGGLE_WIDTH = 60 * SCALE_MULTIPLIER
 local TOGGLE_HEIGHT = 28 * SCALE_MULTIPLIER
 local TOGGLE_CIRCLE_SIZE = 22 * SCALE_MULTIPLIER
@@ -54,7 +56,6 @@ local ICON_CIRCLE_SIZE = LABEL_BG_HEIGHT
 local MAIN_FRAME_WIDTH = 260 * SCALE_MULTIPLIER
 local TOGGLE_BUTTON_SIZE = 40 * SCALE_MULTIPLIER
 local MINIMUM_FRAME_WIDTH = 200 * SCALE_MULTIPLIER
-local MINIMUM_FRAME_HEIGHT = 150 * SCALE_MULTIPLIER
 
 -- Font settings
 local MAIN_FONT = Enum.Font.SourceSansBold
@@ -64,27 +65,28 @@ local FARM_SPEED = 22
 local EVENT_CURRENCY = "SnowToken"
 
 -- Timing settings
-local NEW_FARM_COLLECT_TIME = 0.35
+local NEW_FARM_COLLECT_TIME = 0.25 
 local NEW_FARM_REST_TIME = 2
+
+-- === LOBBY CHECK SETTINGS ===
+local LOBBY_SPAWN_POINT = Vector3.new(-5082.51, 281.79, 64.05)
+local LOBBY_SAFE_RADIUS = 350
 
 -- Icons
 local ICON_CIRCLE_OFFSETS = {
     ["[Tween] Event Farm"] = 0,
     ["[Teleport] Event Farm"] = 0,
-    ["Auto Reset"] = 0,
     ["Disable Rendering"] = 0
 }
 
 local ASSET_IDS = {
     ["[Tween] Event Farm"] = 83772946070955,
     ["[Teleport] Event Farm"] = 83772946070955,
-    ["Auto Reset"] = 135643354310855,
     ["Disable Rendering"] = 88413977788163
 }
 
 -- Variables
 local coinsCollected = 0
--- Global flags used for mutual exclusion check
 local EventFarmStarted = false
 local EventFarmIN = false
 local eventfarmstopevent = Instance.new("BindableEvent")
@@ -93,15 +95,18 @@ local NewEventFarmStarted = false
 local NewEventFarmIN = false
 local neweventfarmstopevent = Instance.new("BindableEvent")
 
-local AutoResetEnabled = false
 local renderDisabled = false
 local renderStartTime = 0
 local blackScreenFrame = nil
 
--- New Variable for Tween Logic
-local isFirstTween = true
+local FinishedFarmingRound = false 
 
--- Platforms
+-- === NEW VARIABLES ===
+local GunAttempted = false -- Gun pickup blocker
+local HasDied = false -- Death flag for fling
+-- =========================
+
+local isFirstTween = true
 local bigPlatform = nil 
 local smallPlatform = nil
 local platformFollowConnection = nil
@@ -110,10 +115,257 @@ local newNoclipConnection = nil
 local antiAFKConnection = nil
 local AntiAFKEnabled = false
 
--- Platform Functions
+-- Fling Variables
+getgenv().OldPos = nil
+getgenv().FPDH = Workspace.FallenPartsDestroyHeight
+
+-- === HELPER FUNCTIONS ===
+
+local function returncoincontaier()
+    for _, v in Workspace:GetChildren() do
+        if v:FindFirstChild("CoinContainer") and v:IsA("Model") then
+            local container = v:FindFirstChild("CoinContainer")
+            if container and #container:GetChildren() > 0 then
+                return container
+            end
+        end
+    end
+    return false
+end
+
+local function isPlayerInLobby()
+    if not player.Character or not player.Character:FindFirstChild("HumanoidRootPart") then return false end
+    local dist = (player.Character.HumanoidRootPart.Position - LOBBY_SPAWN_POINT).Magnitude
+    return dist < LOBBY_SAFE_RADIUS
+end
+
+-- === ROLE DETECTION ===
+
+local function GetPlayerData()
+    local success, roles = pcall(function() 
+        return ReplicatedStorage:FindFirstChild("GetPlayerData", true):InvokeServer() 
+    end)
+    return success and roles or nil
+end
+
+local function GetMurderer()
+    local roles = GetPlayerData()
+    if roles then
+        for i, v in pairs(roles) do
+            if v.Role == "Murderer" then
+                return Players:FindFirstChild(i)
+            end
+        end
+    end
+    return nil
+end
+
+local function GetSheriff()
+    local roles = GetPlayerData()
+    if roles then
+        for i, v in pairs(roles) do
+            if v.Role == "Sheriff" then
+                return Players:FindFirstChild(i)
+            end
+        end
+    end
+    return nil
+end
+
+-- === FLING LOGIC ===
+
+local function SkidFling(TargetPlayer, FlingDuration)
+    if not TargetPlayer then return end
+    
+    local Character = player.Character
+    local Humanoid = Character and Character:FindFirstChildOfClass("Humanoid")
+    local RootPart = Humanoid and Humanoid.RootPart
+    
+    local TCharacter = TargetPlayer.Character
+    local THumanoid = TCharacter and TCharacter:FindFirstChildOfClass("Humanoid")
+    local TRootPart = THumanoid and THumanoid.RootPart
+    local THead = TCharacter and TCharacter:FindFirstChild("Head")
+    
+    if not Character or not Humanoid or not RootPart then return end
+    if not TCharacter or not TRootPart then return end
+    
+    getgenv().OldPos = RootPart.CFrame
+    Workspace.FallenPartsDestroyHeight = 0/0
+    
+    local BV = Instance.new("BodyVelocity")
+    BV.Parent = RootPart
+    BV.Velocity = Vector3.new(0, 0, 0)
+    BV.MaxForce = Vector3.new(9e9, 9e9, 9e9)
+    
+    Humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, false)
+    
+    local FPos = function(BasePart, Pos, Ang)
+        RootPart.CFrame = CFrame.new(BasePart.Position) * Pos * Ang
+        Character:SetPrimaryPartCFrame(CFrame.new(BasePart.Position) * Pos * Ang)
+        RootPart.Velocity = Vector3.new(9e7, 9e7 * 10, 9e7)
+        RootPart.RotVelocity = Vector3.new(9e8, 9e8, 9e8)
+    end
+    
+    local SFBasePart = function(BasePart)
+        local TimeToWait = FlingDuration or 1.5 
+        local Time = tick()
+        local Angle = 0
+    
+        repeat
+            if RootPart and THumanoid then
+                if BasePart.Velocity.Magnitude < 50 then
+                    Angle = Angle + 100
+                    FPos(BasePart, CFrame.new(0, 1.5, 0) + THumanoid.MoveDirection * BasePart.Velocity.Magnitude / 1.25, CFrame.Angles(math.rad(Angle),0 ,0))
+                    task.wait()
+                    FPos(BasePart, CFrame.new(0, -1.5, 0) + THumanoid.MoveDirection * BasePart.Velocity.Magnitude / 1.25, CFrame.Angles(math.rad(Angle), 0, 0))
+                    task.wait()
+                    FPos(BasePart, CFrame.new(0, 1.5, 0) + THumanoid.MoveDirection, CFrame.Angles(math.rad(Angle),0 ,0))
+                    task.wait()
+                    FPos(BasePart, CFrame.new(0, -1.5, 0) + THumanoid.MoveDirection, CFrame.Angles(math.rad(Angle), 0, 0))
+                    task.wait()
+                else
+                    FPos(BasePart, CFrame.new(0, 1.5, THumanoid.WalkSpeed), CFrame.Angles(math.rad(90), 0, 0))
+                    task.wait()
+                    FPos(BasePart, CFrame.new(0, -1.5, -THumanoid.WalkSpeed), CFrame.Angles(0, 0, 0))
+                    task.wait()
+                    FPos(BasePart, CFrame.new(0, -1.5, 0), CFrame.Angles(math.rad(90), 0, 0))
+                    task.wait()
+                    FPos(BasePart, CFrame.new(0, -1.5, 0), CFrame.Angles(0, 0, 0))
+                    task.wait()
+                end
+            end
+        until Time + TimeToWait < tick()
+    end
+    
+    if TRootPart then
+        SFBasePart(TRootPart)
+    elseif THead then
+        SFBasePart(THead)
+    end
+    
+    if BV then BV:Destroy() end
+    Humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, true)
+    
+    if getgenv().OldPos then
+        RootPart.CFrame = getgenv().OldPos
+        Character:SetPrimaryPartCFrame(getgenv().OldPos)
+        Humanoid:ChangeState("GettingUp")
+        for _, part in pairs(Character:GetChildren()) do
+             if part:IsA("BasePart") then
+                 part.Velocity, part.RotVelocity = Vector3.new(), Vector3.new()
+             end
+        end
+        Workspace.FallenPartsDestroyHeight = getgenv().FPDH
+    end
+end
+
+local function TriggerFlingSequence(role, durationOverride)
+    local target = nil
+    local duration = durationOverride or 1.5
+
+    if role == "Murderer" then
+        target = GetMurderer()
+    elseif role == "Sheriff" then
+        target = GetSheriff()
+    end
+
+    if target and target ~= player then
+        SkidFling(target, duration)
+    end
+end
+
+-- === AUTO GET GUN LOGIC ===
+
+local function getNearestGun()
+	local char = player.Character
+	if not char then return nil end
+	local root = char:FindFirstChild("HumanoidRootPart")
+	if not root then return nil end
+
+	local closestGun, closestDist = nil, 5000
+	for _, item in ipairs(Workspace:GetDescendants()) do
+		if item.Name == "GunDrop" then
+			local success, pos = pcall(function() return item:GetPivot().Position end)
+			if success then
+				local dist = (root.Position - pos).Magnitude
+				if dist < closestDist then
+					closestGun, closestDist = item, dist
+				end
+			end
+		end
+	end
+	return closestGun
+end
+
+local function processAutoGun(farmType)
+    -- === ATTEMPT CHECK ===
+    if GunAttempted then return false end
+    -- ===========================
+
+    local char = player.Character
+    if char and (char:FindFirstChild("Gun") or (player.Backpack and player.Backpack:FindFirstChild("Gun"))) then
+        GunAttempted = true -- Already have gun
+        return false 
+    end
+
+    local gun = getNearestGun()
+    if gun then
+        GunAttempted = true -- Mark as attempted immediately if gun found
+        
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            -- Logic for Teleport Farm
+            if farmType == "Teleport" then
+                -- 1. Secure on platform first
+                if bigPlatform then
+                    hrp.CFrame = CFrame.new(bigPlatform.Position + Vector3.new(0, 5, 0))
+                    task.wait(0.2)
+                end
+               
+                -- 2. Teleport to Gun
+                hrp.AssemblyLinearVelocity = Vector3.zero
+                local gunPos = gun:GetPivot().Position
+                hrp.CFrame = CFrame.new(gunPos + Vector3.new(0, 1, 0))
+                
+                local timeout = tick() + 1
+                while gun:IsDescendantOf(Workspace) and tick() < timeout do
+                    task.wait(0.1)
+                    if gun:IsDescendantOf(Workspace) then
+                        hrp.CFrame = CFrame.new(gun:GetPivot().Position) -- Force collect
+                    end
+                end
+                
+                -- 3. Return to platform immediately handled by main loop
+                return true
+                
+            -- Logic for Tween Farm
+            elseif farmType == "Tween" then
+                -- 1. Pause Tween (Handled by caller cancelling tween)
+                hrp.AssemblyLinearVelocity = Vector3.zero
+                
+                -- 2. Tween to Gun
+                local gunPos = gun:GetPivot().Position
+                local dist = (hrp.Position - gunPos).Magnitude
+                local gunTween = TweenService:Create(hrp, TweenInfo.new(dist / (FARM_SPEED * 1.5), Enum.EasingStyle.Linear), {CFrame = CFrame.new(gunPos)})
+                gunTween:Play()
+                gunTween.Completed:Wait()
+                
+                local timeout = tick() + 1
+                while gun:IsDescendantOf(Workspace) and tick() < timeout do
+                    task.wait(0.1)
+                    hrp.CFrame = CFrame.new(gun:GetPivot().Position)
+                end
+                return true
+            end
+        end
+    end
+    return false
+end
+
+-- === PLATFORM FUNCTIONS ===
+
 local function createBigPlatform()
     if bigPlatform then bigPlatform:Destroy() bigPlatform = nil end
-    
     if not player.Character or not player.Character:FindFirstChild("HumanoidRootPart") then return nil end
     
     local hrp = player.Character.HumanoidRootPart
@@ -164,7 +416,6 @@ end
 
 local function startPlatformFollowing()
     if platformFollowConnection then platformFollowConnection:Disconnect() end
-    
     local followOffset = Vector3.new(0, -3.5, 0)
     
     platformFollowConnection = RunService.RenderStepped:Connect(function()
@@ -179,7 +430,6 @@ local function removeAllPlatforms()
         platformFollowConnection:Disconnect()
         platformFollowConnection = nil
     end
-    
     if bigPlatform then bigPlatform:Destroy() bigPlatform = nil end
     if smallPlatform then smallPlatform:Destroy() smallPlatform = nil end
 end
@@ -209,7 +459,6 @@ local function setupFarmNoClip(enabled, isNew)
 
     if isNew then
         if newNoclipConnection then newNoclipConnection:Disconnect() newNoclipConnection = nil end
-        
         if enabled then
             newNoclipConnection = RunService.Stepped:Connect(function()
                 if NewEventFarmStarted and NewEventFarmIN and player.Character then
@@ -233,29 +482,69 @@ local function setupFarmNoClip(enabled, isNew)
     end
 end
 
--- Farm Logic
+-- Farm Logic (Teleport with Smooth Downward Motion)
 local function teleportToCoinAndBack(coinPosition)
     if not player.Character or not player.Character:FindFirstChild("HumanoidRootPart") then return end
     
     local hrp = player.Character.HumanoidRootPart
     
-    hrp.CFrame = CFrame.new(coinPosition)
+    -- 1. TELEPORT SLIGHTLY ABOVE (3 studs)
+    local startHeightOffset = Vector3.new(0, 3, 0) 
+    hrp.CFrame = CFrame.new(coinPosition + startHeightOffset)
     
     setupFarmNoClip(true, true)
     
+    -- 2. TWEEN DOWN TO CENTER (0 studs) - Soft movement
+    local tweenInfo = TweenInfo.new(NEW_FARM_COLLECT_TIME, Enum.EasingStyle.Linear)
+    local targetCFrame = CFrame.new(coinPosition) 
+    
+    local moveTween = TweenService:Create(hrp, tweenInfo, {CFrame = targetCFrame})
+    moveTween:Play()
+    
     local startFall = tick()
     while tick() - startFall < NEW_FARM_COLLECT_TIME do
-        if not NewEventFarmIN then return end
-        task.wait(0.1)
+        if not NewEventFarmIN then 
+            moveTween:Cancel()
+            return 
+        end
+        task.wait(0.05)
     end
     
-    teleportToBigPlatform()
+    -- 3. RETURN TO BASE
+    moveTween:Cancel()
+    hrp.AssemblyLinearVelocity = Vector3.zero
+    hrp.AssemblyAngularVelocity = Vector3.zero
     
+    if not bigPlatform then createBigPlatform() end
+
     setupFarmNoClip(false, true)
+
+    local safelyOnPlatform = false
+    local attempts = 0
     
+    while not safelyOnPlatform and attempts < 10 do
+        teleportToBigPlatform()
+        task.wait(0.1) 
+        if bigPlatform then
+            local dist = (hrp.Position - Vector3.new(bigPlatform.Position.X, hrp.Position.Y, bigPlatform.Position.Z)).Magnitude
+            if dist < 50 then 
+                safelyOnPlatform = true
+            end
+        end
+        attempts = attempts + 1
+    end
+    
+    -- 4. REST & CHECK GUN
     local startWait = tick()
     while tick() - startWait < NEW_FARM_REST_TIME do
         if not NewEventFarmIN then break end
+        
+        -- Check Gun during rest
+        if processAutoGun("Teleport") then
+             -- If we got gun, logic inside processed it. Break wait to continue farming immediately.
+             break
+        end
+        
         task.wait(0.1)
     end
 end
@@ -310,11 +599,29 @@ local function handleCharacterDeath(isNew)
     end
 end
 
+local function killCharacter()
+    local char = player.Character
+    if char then char:BreakJoints() return true end
+    return false
+end
+
 local function monitorCharacterDeath()
     local function onCharacterAdded(char)
-        local humanoid = char:WaitForChild("Humanoid", 5)
+        local humanoid = char:WaitForChild("Humanoid", 10)
+        
+        -- === NEW LOGIC: FLING AFTER DEATH (RESPAWN) ===
+        if HasDied then
+            task.spawn(function()
+                task.wait(2) -- Wait for character load
+                TriggerFlingSequence("Murderer", 1.5)
+                HasDied = false -- Reset death flag
+            end)
+        end
+        -- ==================================================
+
         if humanoid then
             humanoid.Died:Connect(function()
+                HasDied = true -- Register death
                 handleCharacterDeath(false)
                 handleCharacterDeath(true)
             end)
@@ -322,24 +629,58 @@ local function monitorCharacterDeath()
         
         char:GetAttributeChangedSignal("Alive"):Connect(function()
             if char:GetAttribute("Alive") == false then
+                HasDied = true -- Register death
                 handleCharacterDeath(false)
                 handleCharacterDeath(true)
             end
         end)
         
+        -- === LOGIC AFTER RESET (FULL BAG) ===
+        if FinishedFarmingRound then
+            task.spawn(function()
+                task.wait(2) -- Wait for character to load properly
+                
+                -- 3 Attempts to Fling Murderer
+                for i = 1, 3 do
+                    TriggerFlingSequence("Murderer", 1.5)
+                    task.wait(1.8)
+                end
+                
+                FinishedFarmingRound = false -- Reset flag
+                
+                -- Reset AGAIN to wait for next round fresh
+                killCharacter()
+            end)
+            return -- Stop here, don't restart farm yet
+        end
+        
+        task.wait(2)
+        
+        if isPlayerInLobby() then
+            EventFarmIN = false
+            NewEventFarmIN = false
+            return 
+        end
+        
         if EventFarmStarted then
-            task.wait(1)
-            if EventFarmIN then setupFarmNoClip(true, false) end
+            if returncoincontaier() then
+                 EventFarmIN = true 
+                 setupFarmNoClip(true, false) 
+            else
+                 EventFarmIN = false
+            end
         end
         
         if NewEventFarmStarted then
-            task.wait(1)
-            if NewEventFarmIN then
+            if returncoincontaier() then
+                NewEventFarmIN = true
                 createBigPlatform()
                 createSmallPlatform()
                 startPlatformFollowing()
                 task.wait(0.5)
                 teleportToBigPlatform()
+            else
+                NewEventFarmIN = false
             end
         end
     end
@@ -354,15 +695,6 @@ monitorCharacterDeath()
 local CoinCollectedEvent = ReplicatedStorage.Remotes.Gameplay.CoinCollected
 local RoundStartEvent = ReplicatedStorage.Remotes.Gameplay.RoundStart
 local RoundEndEvent = ReplicatedStorage.Remotes.Gameplay.RoundEndFade
-
-local function returncoincontaier()
-    for _, v in Workspace:GetChildren() do
-        if v:FindFirstChild("CoinContainer") and v:IsA("Model") then
-            return v:FindFirstChild("CoinContainer")
-        end
-    end
-    return false
-end
 
 local function FindNearestCoin(container, coinType)
     local coin = nil
@@ -381,92 +713,140 @@ local function FindNearestCoin(container, coinType)
     return {coin, magn}
 end
 
-local function killCharacter()
-    if not AutoResetEnabled then return false end
-    local char = player.Character
-    if char then char:BreakJoints() return true end
-    return false
-end
-
 -- Events
 CoinCollectedEvent.OnClientEvent:Connect(function(cointype, current, max)
+    local bagFull = (tonumber(current) == tonumber(max))
+    
+    local function StopAndReset()
+        EventFarmIN = false
+        NewEventFarmIN = false
+        setupFarmNoClip(false, false)
+        setupFarmNoClip(false, true)
+        removeAllPlatforms()
+        
+        FinishedFarmingRound = true -- Set Flag for next Respawn
+        killCharacter() -- Auto Reset
+    end
+
     if EventFarmStarted and EventFarmIN then
         if cointype == EVENT_CURRENCY then
-            EventFarmIN = true
             coinsCollected = coinsCollected + 1
         end
-        if cointype == EVENT_CURRENCY and tonumber(current) == tonumber(max) then
-            EventFarmIN = false
-            setupFarmNoClip(false, false)
-            if AutoResetEnabled then killCharacter() end
+        if cointype == EVENT_CURRENCY and bagFull then
+            StopAndReset()
         end
     end
-    
+
     if NewEventFarmStarted and NewEventFarmIN then
         if cointype == EVENT_CURRENCY then
-            NewEventFarmIN = true
             coinsCollected = coinsCollected + 1
         end
-        if cointype == EVENT_CURRENCY and tonumber(current) == tonumber(max) then
-            NewEventFarmIN = false
-            setupFarmNoClip(false, true)
-            removeAllPlatforms()
-            if AutoResetEnabled then killCharacter() end
+        if cointype == EVENT_CURRENCY and bagFull then
+            StopAndReset()
         end
     end
 end)
 
+-- === UPDATED ROUND START LOGIC (FLING IF NO COINS) ===
 RoundStartEvent.OnClientEvent:Connect(function()
-    if EventFarmStarted then
-        EventFarmIN = true
-        isFirstTween = true -- Reset to teleport to first coin on new round
-        setupFarmNoClip(true, false)
-    end
-    
-    if NewEventFarmStarted then
-        NewEventFarmIN = true
-        createBigPlatform()
-        createSmallPlatform()
-        startPlatformFollowing()
-        task.wait(0.5)
-        teleportToBigPlatform()
+    GunAttempted = false -- RESET GUN PICKUP ATTEMPT FOR NEW ROUND
+
+    if EventFarmStarted or NewEventFarmStarted then
+        
+        -- === 1. SHERIFF FLING (Kept as is) ===
+        task.spawn(function()
+            task.wait(1) 
+            TriggerFlingSequence("Sheriff", 2.0) -- Fling Sheriff 2 sec
+        end)
+        
+        task.wait(3.5) -- Wait for sheriff fling to end
+
+        -- === 2. SPECIAL MODE CHECK (NO COINS) ===
+        local coinContainer = returncoincontaier()
+
+        if not coinContainer then
+            -- NO COINS: Start mass fling
+            local originalPos = nil
+            if player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+                originalPos = player.Character.HumanoidRootPart.CFrame
+            end
+
+            -- Iterate all players
+            for _, target in pairs(Players:GetPlayers()) do
+                if target ~= player and target.Character and target.Character:FindFirstChild("HumanoidRootPart") then
+                    -- Check if local char is alive before attack
+                    if not player.Character or not player.Character:FindFirstChild("HumanoidRootPart") then break end
+                    
+                    -- Fling player 1.5 seconds
+                    SkidFling(target, 1.5)
+                end
+            end
+
+            -- Return to original position
+            if originalPos and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+                player.Character.HumanoidRootPart.CFrame = originalPos
+                player.Character.HumanoidRootPart.AssemblyLinearVelocity = Vector3.zero
+                player.Character.HumanoidRootPart.AssemblyAngularVelocity = Vector3.zero
+            end
+
+        else
+            -- COINS EXIST: Start normal farm
+            if EventFarmStarted then
+                EventFarmIN = true
+                isFirstTween = true 
+                setupFarmNoClip(true, false)
+            end
+            
+            if NewEventFarmStarted then
+                NewEventFarmIN = true
+                createBigPlatform()
+                createSmallPlatform()
+                startPlatformFollowing()
+                task.wait(0.5)
+                teleportToBigPlatform()
+            end
+        end
     end
 end)
 
 RoundEndEvent.OnClientEvent:Connect(function()
-    if EventFarmStarted then
-        EventFarmIN = false
-        setupFarmNoClip(false, false)
-    end
-    
-    if NewEventFarmStarted then
-        NewEventFarmIN = false
-        setupFarmNoClip(false, true)
-        removeAllPlatforms()
-    end
+    EventFarmIN = false
+    NewEventFarmIN = false
+    setupFarmNoClip(false, false)
+    setupFarmNoClip(false, true)
+    removeAllPlatforms()
 end)
 
 -- Tween Farm Loop
 task.spawn(function()
     while true do
-        if EventFarmStarted and EventFarmIN and player.Character and returncoincontaier() and player:GetAttribute("Alive") then
-            local coinData = FindNearestCoin(returncoincontaier(), EVENT_CURRENCY)
+        if EventFarmStarted and isPlayerInLobby() then
+            EventFarmIN = false
+            setupFarmNoClip(false, false)
+            task.wait(1)
+        end
+
+        local container = returncoincontaier()
+        if EventFarmStarted and EventFarmIN and player.Character and container and player:GetAttribute("Alive") then
+            
+            -- Check Gun (Pass "Tween" type)
+            if processAutoGun("Tween") then
+                -- Resume loop
+            end
+            
+            local coinData = FindNearestCoin(container, EVENT_CURRENCY)
             if coinData[1] ~= nil then
-                
-                -- MODIFIED: Logic for Teleport First, then Tween
                 if isFirstTween then
-                    -- Teleport Logic
-                    player.Character.HumanoidRootPart.CFrame = CFrame.new(coinData[1].Position)
+                    -- Initial TP above
+                    player.Character.HumanoidRootPart.CFrame = CFrame.new(coinData[1].Position + Vector3.new(0,2,0))
                     isFirstTween = false
-                    
-                    -- Wait briefly for coin collection to register
                     local startWait = tick()
                     while coinData[1] and coinData[1]:FindFirstChild("TouchInterest") and (tick() - startWait < 0.5) do
                         task.wait()
                     end
                 else
-                    -- Standard Tween Logic
                     local distance = coinData[2]
+                    -- Tween directly to coin center
                     local tween = TweenService:Create(
                         player.Character.HumanoidRootPart, 
                         TweenInfo.new(distance / FARM_SPEED, Enum.EasingStyle.Linear), 
@@ -501,14 +881,27 @@ end)
 -- Teleport Farm Loop
 task.spawn(function()
     while true do
-        if NewEventFarmStarted and NewEventFarmIN and player.Character and returncoincontaier() and player:GetAttribute("Alive") then
+        if NewEventFarmStarted and isPlayerInLobby() then
+            NewEventFarmIN = false
+            setupFarmNoClip(false, true)
+            removeAllPlatforms()
+            task.wait(1)
+        end
+
+        local container = returncoincontaier()
+        if NewEventFarmStarted and NewEventFarmIN and player.Character and container and player:GetAttribute("Alive") then
             if not bigPlatform then createBigPlatform() end
             if not smallPlatform then createSmallPlatform() startPlatformFollowing() end
             
-            local coinData = FindNearestCoin(returncoincontaier(), EVENT_CURRENCY)
+            -- Gun Check handled inside wait loop of teleportToCoinAndBack, but we check here too if idle
+            local acted = processAutoGun("Teleport")
+            if acted then
+                teleportToBigPlatform() 
+            end
+            
+            local coinData = FindNearestCoin(container, EVENT_CURRENCY)
             if coinData[1] ~= nil then
                 teleportToCoinAndBack(coinData[1].Position)
-                task.wait(0.1)
             else
                 task.wait(0.3)
             end
@@ -546,7 +939,7 @@ local function createBlackScreen()
     centerContainer.Position = UDim2.new(0.5, 0, 0.5, 0)
     centerContainer.BackgroundTransparency = 1
     centerContainer.ZIndex = 2
-   
+    
     local optimizationText = Instance.new("TextLabel")
     optimizationText.Parent = centerContainer
     optimizationText.Text = "Optimization Enabled"
@@ -584,7 +977,7 @@ local function createBlackScreen()
     coinsText.Font = MAIN_FONT
     coinsText.TextSize = 24 * SCALE_MULTIPLIER
     coinsText.ZIndex = 3
-    
+
     return blackScreenFrame
 end
 
@@ -602,7 +995,6 @@ local function updateBlackScreenInfo()
                     local seconds = elapsed % 60
                     timerLabel.Text = string.format("%02d:%02d:%02d", hours, minutes, seconds)
                 end
-                
                 local coinsLabel = centerContainer:FindFirstChild("CoinsCounter")
                 if coinsLabel then
                     coinsLabel.Text = "Coins collected: " .. tostring(coinsCollected)
@@ -671,17 +1063,18 @@ ScreenGui.Parent = player.PlayerGui
 ScreenGui.ResetOnSpawn = false
 ScreenGui.DisplayOrder = 100
 
+-- Toggle Items (Optimized)
 local ToggleItems = {
     {Name = "[Tween] Event Farm"},
     {Name = "[Teleport] Event Farm"},
-    {Name = "Auto Reset"},
     {Name = "Disable Rendering"}
 }
 
 local TOTAL_TOGGLES = #ToggleItems
 local TOTAL_ROWS_HEIGHT = TOGGLE_TOP_MARGIN + (TOTAL_TOGGLES * LABEL_BG_HEIGHT) + ((TOTAL_TOGGLES - 1) * ROW_SPACING)
-local INFO_PANEL_HEIGHT = 40 * SCALE_MULTIPLIER
-local MAIN_FRAME_HEIGHT = TOTAL_ROWS_HEIGHT + INFO_PANEL_HEIGHT + 10 * SCALE_MULTIPLIER
+local INFO_PANEL_HEIGHT = 25 * SCALE_MULTIPLIER -- Compact info panel
+local UPDATE_LOG_HEIGHT = 65 * SCALE_MULTIPLIER -- New compact height for log
+local MAIN_FRAME_HEIGHT = TOTAL_ROWS_HEIGHT + INFO_PANEL_HEIGHT + UPDATE_LOG_HEIGHT + 10 * SCALE_MULTIPLIER
 
 local MainFrame = Instance.new("Frame")
 MainFrame.Name = "MainFrame"
@@ -698,8 +1091,9 @@ MainFrame:GetPropertyChangedSignal("Size"):Connect(function()
     if MainFrame.AbsoluteSize.X < MINIMUM_FRAME_WIDTH then
         MainFrame.Size = UDim2.new(0, MINIMUM_FRAME_WIDTH, MainFrame.Size.Y.Scale, MainFrame.Size.Y.Offset)
     end
-    if MainFrame.AbsoluteSize.Y < MINIMUM_FRAME_HEIGHT then
-        MainFrame.Size = UDim2.new(MainFrame.Size.X.Scale, MainFrame.Size.X.Offset, 0, MINIMUM_FRAME_HEIGHT)
+    -- Adjusted minimum height check
+    if MainFrame.AbsoluteSize.Y < 220 * SCALE_MULTIPLIER then
+        MainFrame.Size = UDim2.new(MainFrame.Size.X.Scale, MainFrame.Size.X.Offset, 0, 220 * SCALE_MULTIPLIER)
     end
 end)
 
@@ -740,7 +1134,7 @@ end)
 local Title = Instance.new("TextLabel")
 Title.Parent = MainFrame
 Title.Text = "Amethyst | Christmas Farm 🎄"
-Title.Size = UDim2.new(1, 0, 0, 40 * SCALE_MULTIPLIER)
+Title.Size = UDim2.new(1, 0, 0, 35 * SCALE_MULTIPLIER) -- Reduced title height
 Title.Position = UDim2.new(0, 0, 0, 0)
 Title.BackgroundTransparency = 1
 Title.TextColor3 = COLOR_SETTINGS.TitleColor
@@ -759,11 +1153,11 @@ Title.InputBegan:Connect(function(input)
     end
 end)
 
--- === FIXED TOGGLE BUTTON (NO MOVING) ===
+-- Toggle Button (Minimizer)
 local ToggleButton = Instance.new("Frame")
 ToggleButton.Name = "ToggleButton"
 ToggleButton.Parent = ScreenGui
-ToggleButton.AnchorPoint = Vector2.new(1, 0) -- Lock to top right corner
+ToggleButton.AnchorPoint = Vector2.new(1, 0) 
 ToggleButton.Size = UDim2.new(0, TOGGLE_BUTTON_SIZE, 0, TOGGLE_BUTTON_SIZE)
 ToggleButton.Position = UDim2.new(1, -10, 0, 10)
 ToggleButton.BackgroundColor3 = COLOR_SETTINGS.ToggleButtonBackground
@@ -802,7 +1196,6 @@ ToggleClickButton.ZIndex = 102
 ToggleClickButton.BorderSizePixel = 0
 
 local function playPressAnimation()
-    -- Only animate size, DO NOT animate Position change relative to drag
     local originalSize = UDim2.new(0, TOGGLE_BUTTON_SIZE, 0, TOGGLE_BUTTON_SIZE)
     local shrinkSize = UDim2.new(0, TOGGLE_BUTTON_SIZE * 0.9, 0, TOGGLE_BUTTON_SIZE * 0.9)
     
@@ -825,7 +1218,6 @@ ToggleClickButton.MouseButton1Click:Connect(function()
     playPressAnimation()
     MainFrame.Visible = not MainFrame.Visible
 end)
--- =======================================
 
 local ToggleElements = {}
 
@@ -835,7 +1227,7 @@ for i, item in ipairs(ToggleItems) do
     local labelWidth = toggleX - 10 * SCALE_MULTIPLIER + LABEL_WIDTH_ADJUST
     
     local labelBackground = Instance.new("Frame")
-    labelBackground.Name = "LabelBG_" .. name:gsub(" ", ""):gsub("%[", ""):gsub("%]", "")
+    labelBackground.Name = "LabelBG_" .. name:gsub(" ", ""):gsub("%[", ""):gsub("%]", ""):gsub("/", "")
     labelBackground.Parent = MainFrame
     labelBackground.Size = UDim2.new(0, labelWidth, 0, LABEL_BG_HEIGHT)
     labelBackground.Position = UDim2.new(0, 10 * SCALE_MULTIPLIER, 0, TOGGLE_TOP_MARGIN + (i-1)*(LABEL_BG_HEIGHT + ROW_SPACING))
@@ -852,7 +1244,7 @@ for i, item in ipairs(ToggleItems) do
     iconCircle.Parent = labelBackground
     iconCircle.Name = "IconCircle"
     iconCircle.Size = UDim2.new(0, ICON_CIRCLE_SIZE, 0, ICON_CIRCLE_SIZE)
-    iconCircle.Position = UDim2.new(0, ICON_CIRCLE_OFFSETS[name], 0, 0)
+    iconCircle.Position = UDim2.new(0, ICON_CIRCLE_OFFSETS[name] or 0, 0, 0)
     iconCircle.BackgroundColor3 = COLOR_SETTINGS.IconCircle
     iconCircle.BackgroundTransparency = 0.3
     iconCircle.ZIndex = 102
@@ -874,8 +1266,8 @@ for i, item in ipairs(ToggleItems) do
     local label = Instance.new("TextLabel")
     label.Parent = labelBackground
     label.Text = name
-    label.Size = UDim2.new(1, -(ICON_CIRCLE_SIZE + ICON_CIRCLE_OFFSETS[name] + 8 * SCALE_MULTIPLIER), 1, 0)
-    label.Position = UDim2.new(0, ICON_CIRCLE_SIZE + ICON_CIRCLE_OFFSETS[name] + 4 * SCALE_MULTIPLIER, 0, 0)
+    label.Size = UDim2.new(1, -(ICON_CIRCLE_SIZE + (ICON_CIRCLE_OFFSETS[name] or 0) + 8 * SCALE_MULTIPLIER), 1, 0)
+    label.Position = UDim2.new(0, ICON_CIRCLE_SIZE + (ICON_CIRCLE_OFFSETS[name] or 0) + 4 * SCALE_MULTIPLIER, 0, 0)
     label.BackgroundTransparency = 1
     label.TextColor3 = COLOR_SETTINGS.TextColor
     label.Font = MAIN_FONT
@@ -885,7 +1277,7 @@ for i, item in ipairs(ToggleItems) do
     label.ZIndex = 101
     
     local toggleFrame = Instance.new("Frame")
-    toggleFrame.Name = "Toggle_" .. name:gsub(" ", ""):gsub("%[", ""):gsub("%]", "")
+    toggleFrame.Name = "Toggle_" .. name:gsub(" ", ""):gsub("%[", ""):gsub("%]", ""):gsub("/", "")
     toggleFrame.Parent = MainFrame
     toggleFrame.Size = UDim2.new(0, TOGGLE_WIDTH, 0, TOGGLE_HEIGHT)
     toggleFrame.Position = UDim2.new(0, toggleX, 0, TOGGLE_TOP_MARGIN + (i-1)*(LABEL_BG_HEIGHT + ROW_SPACING) + (LABEL_BG_HEIGHT - TOGGLE_HEIGHT)/2)
@@ -924,7 +1316,6 @@ for i, item in ipairs(ToggleItems) do
     local function toggle()
         toggled = not toggled
         
-        -- Update the stored state immediately
         if ToggleElements[name] then
             ToggleElements[name].toggled = toggled
         end
@@ -947,7 +1338,6 @@ for i, item in ipairs(ToggleItems) do
                 end
             end
         end
-        -- ========================================================
 
         TweenService:Create(toggleFrame, TweenInfo.new(TOGGLE_ANIMATION_TIME, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {BackgroundColor3 = toggled and COLOR_SETTINGS.ToggleOn or COLOR_SETTINGS.ToggleOff}):Play()
         local targetX = toggled and (TOGGLE_WIDTH - TOGGLE_CIRCLE_SIZE - 3 * SCALE_MULTIPLIER) or 3 * SCALE_MULTIPLIER
@@ -958,13 +1348,12 @@ for i, item in ipairs(ToggleItems) do
             if toggled then
                 EventFarmStarted = true
                 SetupAntiAFK(true)
-                isFirstTween = true -- Reset logic so first coin is teleported
-                -- removed coinsCollected = 0 to keep count across switches
-                if returncoincontaier() and player:GetAttribute("Alive") then
+                isFirstTween = true 
+                if returncoincontaier() and player:GetAttribute("Alive") and not isPlayerInLobby() then
                     EventFarmIN = true
                     setupFarmNoClip(true, false)
                 else
-                    EventFarmIN = false
+                    EventFarmIN = false 
                 end
             else
                 EventFarmStarted = false
@@ -977,8 +1366,7 @@ for i, item in ipairs(ToggleItems) do
             if toggled then
                 NewEventFarmStarted = true
                 SetupAntiAFK(true)
-                -- removed coinsCollected = 0 to keep count across switches
-                if returncoincontaier() and player:GetAttribute("Alive") then
+                if returncoincontaier() and player:GetAttribute("Alive") and not isPlayerInLobby() then
                     NewEventFarmIN = true
                     setupFarmNoClip(true, true)
                     createBigPlatform()
@@ -987,7 +1375,7 @@ for i, item in ipairs(ToggleItems) do
                     task.wait(0.5)
                     teleportToBigPlatform()
                 else
-                    NewEventFarmIN = false
+                    NewEventFarmIN = false 
                 end
             else
                 NewEventFarmStarted = false
@@ -997,8 +1385,6 @@ for i, item in ipairs(ToggleItems) do
                 setupFarmNoClip(false, true)
                 removeAllPlatforms()
             end
-        elseif name == "Auto Reset" then
-            AutoResetEnabled = toggled
         elseif name == "Disable Rendering" then
             if toggled then
                 renderDisabled = true
@@ -1020,12 +1406,12 @@ for i, item in ipairs(ToggleItems) do
     end
 
     clickButton.MouseButton1Click:Connect(function() toggle() end)
-    
     ToggleElements[name] = {frame = toggleFrame, circle = circle, toggled = toggled, toggleFunction = toggle}
 end
 
-local lastToggleY = TOGGLE_TOP_MARGIN + ((#ToggleItems - 1) * (LABEL_BG_HEIGHT + ROW_SPACING)) + LABEL_BG_HEIGHT + 5 * SCALE_MULTIPLIER
+local lastToggleY = TOGGLE_TOP_MARGIN + ((#ToggleItems - 1) * (LABEL_BG_HEIGHT + ROW_SPACING)) + LABEL_BG_HEIGHT + 3 * SCALE_MULTIPLIER
 
+-- === INFO PANEL (AFK + TIMER) ===
 local InfoPanel = Instance.new("Frame")
 InfoPanel.Name = "InfoPanel"
 InfoPanel.Parent = MainFrame
@@ -1038,7 +1424,7 @@ InfoPanel.ZIndex = 101
 local AntiAFKText = Instance.new("TextLabel")
 AntiAFKText.Name = "AntiAFKText"
 AntiAFKText.Parent = InfoPanel
-AntiAFKText.Size = UDim2.new(1, 0, 0.5, 0)
+AntiAFKText.Size = UDim2.new(0.6, 0, 1, 0)
 AntiAFKText.Position = UDim2.new(0, 0, 0, 0)
 AntiAFKText.BackgroundTransparency = 1
 AntiAFKText.Font = MAIN_FONT
@@ -1051,15 +1437,57 @@ AntiAFKText.ZIndex = 101
 local GameTimeStatus = Instance.new("TextLabel")
 GameTimeStatus.Name = "GameTimeStatus"
 GameTimeStatus.Parent = InfoPanel
-GameTimeStatus.Size = UDim2.new(1, 0, 0.5, 0)
-GameTimeStatus.Position = UDim2.new(0, 0, 0.5, 0)
+GameTimeStatus.Size = UDim2.new(0.4, 0, 1, 0)
+GameTimeStatus.Position = UDim2.new(0.6, 0, 0, 0)
 GameTimeStatus.BackgroundTransparency = 1
 GameTimeStatus.Font = MAIN_FONT
 GameTimeStatus.TextSize = 14 * SCALE_MULTIPLIER
-GameTimeStatus.TextXAlignment = Enum.TextXAlignment.Left
+GameTimeStatus.TextXAlignment = Enum.TextXAlignment.Right
 GameTimeStatus.TextColor3 = COLOR_SETTINGS.TextColor
 GameTimeStatus.Visible = true
 GameTimeStatus.ZIndex = 101
+
+-- === UPDATE LOG SECTION ===
+local updateLogY = lastToggleY + INFO_PANEL_HEIGHT + 3 * SCALE_MULTIPLIER
+
+local UpdateLogFrame = Instance.new("Frame")
+UpdateLogFrame.Name = "UpdateLogFrame"
+UpdateLogFrame.Parent = MainFrame
+UpdateLogFrame.Size = UDim2.new(1, -20 * SCALE_MULTIPLIER, 0, UPDATE_LOG_HEIGHT)
+UpdateLogFrame.Position = UDim2.new(0, 10 * SCALE_MULTIPLIER, 0, updateLogY)
+UpdateLogFrame.BackgroundColor3 = COLOR_SETTINGS.LabelBackground
+UpdateLogFrame.BackgroundTransparency = LABEL_BG_TRANSPARENCY
+UpdateLogFrame.BorderSizePixel = 0
+UpdateLogFrame.ZIndex = 101
+
+local LogCorner = Instance.new("UICorner")
+LogCorner.CornerRadius = UDim.new(0, LABEL_BG_CORNER_RADIUS)
+LogCorner.Parent = UpdateLogFrame
+
+local LogTitle = Instance.new("TextLabel")
+LogTitle.Parent = UpdateLogFrame
+LogTitle.Text = "Change Log"
+LogTitle.Size = UDim2.new(1, 0, 0, 20 * SCALE_MULTIPLIER)
+LogTitle.Position = UDim2.new(0, 0, 0, 2 * SCALE_MULTIPLIER) -- Top padding 2
+LogTitle.BackgroundTransparency = 1
+LogTitle.TextColor3 = COLOR_SETTINGS.TextColor
+LogTitle.Font = MAIN_FONT
+LogTitle.TextSize = 14 * SCALE_MULTIPLIER
+LogTitle.ZIndex = 102
+
+local LogContent = Instance.new("TextLabel")
+LogContent.Parent = UpdateLogFrame
+LogContent.Text = "• Murder / Sheriff fling\n• Removed Auto Reset toggle\n• Auto Reset is included in farm"
+LogContent.Size = UDim2.new(1, -10 * SCALE_MULTIPLIER, 1, -22 * SCALE_MULTIPLIER)
+LogContent.Position = UDim2.new(0, 5 * SCALE_MULTIPLIER, 0, 20 * SCALE_MULTIPLIER) -- Below title
+LogContent.BackgroundTransparency = 1
+LogContent.TextColor3 = COLOR_SETTINGS.TextColor
+LogContent.Font = Enum.Font.SourceSans
+LogContent.TextSize = 12 * SCALE_MULTIPLIER -- Small text
+LogContent.TextXAlignment = Enum.TextXAlignment.Left
+LogContent.TextYAlignment = Enum.TextYAlignment.Top
+LogContent.ZIndex = 102
+-- ============================
 
 local startTime = tick()
 
@@ -1079,7 +1507,7 @@ local function updateInfoPanel()
         AntiAFKText.TextColor3 = COLOR_SETTINGS.AntiAFKInactive
     end
     local elapsedTime = tick() - startTime
-    GameTimeStatus.Text = "Time in game: " .. formatTime(elapsedTime)
+    GameTimeStatus.Text = formatTime(elapsedTime)
 end
 
 task.spawn(function()
